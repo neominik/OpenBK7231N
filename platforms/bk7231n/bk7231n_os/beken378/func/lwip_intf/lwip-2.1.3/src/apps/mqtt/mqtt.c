@@ -611,7 +611,8 @@ mqtt_output_check_space(struct mqtt_ringbuf_t *rb, u16_t r_length)
     r_length >>= 7;
   } while (r_length > 0);
 
-  return (total_len <= mqtt_ringbuf_free(rb));
+  /* strictly less: put == get means empty, so writing all free bytes would drop the oldest one */
+  return (total_len < mqtt_ringbuf_free(rb));
 }
 
 
@@ -1005,17 +1006,20 @@ mqtt_parse_incoming(mqtt_client_t *client, struct pbuf *p)
       }
     } else {
       /* Fixed header has been parsed, parse variable header */
-      u16_t cpy_len, buffer_space;
+      u16_t cpy_len, cpy_start, buffer_space;
+
+      /* Append to what an earlier TCP segment already buffered for this chunk */
+      cpy_start = (client->msg_idx - fixed_hdr_len) % (MQTT_VAR_HEADER_BUFFER_LEN - fixed_hdr_len) + fixed_hdr_len;
 
       /* Allow to copy the lesser one of available length in input data or bytes remaining in message */
       cpy_len = (u16_t)LWIP_MIN((u16_t)(p->tot_len - in_offset), msg_rem_len);
 
       /* Limit to available space in buffer */
-      buffer_space = MQTT_VAR_HEADER_BUFFER_LEN - fixed_hdr_len;
+      buffer_space = MQTT_VAR_HEADER_BUFFER_LEN - cpy_start;
       if (cpy_len > buffer_space) {
         cpy_len = buffer_space;
       }
-      pbuf_copy_partial(p, client->rx_buffer + fixed_hdr_len, cpy_len, in_offset);
+      pbuf_copy_partial(p, client->rx_buffer + cpy_start, cpy_len, in_offset);
 
       /* Advance get and put indexes  */
       client->msg_idx += cpy_len;
@@ -1025,7 +1029,7 @@ mqtt_parse_incoming(mqtt_client_t *client, struct pbuf *p)
       LWIP_DEBUGF(MQTT_DEBUG_TRACE, ("mqtt_parse_incoming: msg_idx: %"U32_F", cpy_len: %"U16_F", remaining %"U32_F"\n", client->msg_idx, cpy_len, msg_rem_len));
       if ((msg_rem_len == 0) || (cpy_len == buffer_space)) {
         /* Whole message received or buffer is full */
-        mqtt_connection_status_t res = mqtt_message_received(client, fixed_hdr_len, cpy_len, msg_rem_len);
+        mqtt_connection_status_t res = mqtt_message_received(client, fixed_hdr_len, (cpy_start + cpy_len) - fixed_hdr_len, msg_rem_len);
         if (res != MQTT_CONNECT_ACCEPTED) {
           return res;
         }
